@@ -7,6 +7,10 @@ export async function POST(req: NextRequest) {
   try {
     const { image_base64, normalized_score, judgment } = await req.json();
 
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return NextResponse.json({ error: 'ANTHROPIC_API_KEY が Vercel に未設定です' }, { status: 500 });
+    }
+
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const msg = await client.messages.create({

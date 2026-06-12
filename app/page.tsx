@@ -199,20 +199,31 @@ export default function Page() {
     setExplanation('');
 
     try {
-      const res = await fetch('/api/explain', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_base64: lastFrameB64,
-          normalized_score: latestResult.normalized_score,
-          judgment: latestResult.judgment,
-        }),
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 25000);
+      let res: Response;
+      try {
+        res = await fetch('/api/explain', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            image_base64: lastFrameB64,
+            normalized_score: latestResult.normalized_score,
+            judgment: latestResult.judgment,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error ?? `エラー (${res.status})`);
       setExplanation(data.explanation);
     } catch (e) {
-      setExplanation('説明の取得に失敗しました: ' + (e instanceof Error ? e.message : '不明なエラー'));
+      const msg = e instanceof Error ? e.message : '不明なエラー';
+      setExplanation(e instanceof Error && e.name === 'AbortError'
+        ? '分析がタイムアウトしました（25秒）。再度お試しください。'
+        : `分析に失敗しました: ${msg}`);
     } finally {
       setExplaining(false);
     }
