@@ -157,7 +157,10 @@ export default function Page() {
 
   useEffect(() => {
     if (mode !== 'inspecting') return;
+    inspectingRef.current = true;
 
+    // 1件ずつ送信し、応答を待ってから次のフレームを送る（並行送信すると
+    // バックエンドにリクエストが滞留し、全部タイムアウトする）
     async function loop() {
       while (inspectingRef.current) {
         const blob = await captureBlob();
@@ -169,20 +172,24 @@ export default function Page() {
           fd.append('file', blob, 'frame.jpg');
           fd.append('heat_threshold', String(heatThresholdRef.current));
           const ic = new AbortController();
-          const it = setTimeout(() => ic.abort(), 8000);
-          fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd, signal: ic.signal })
-            .then(r => r.json())
-            .then((data: InspectResult) => {
+          const it = setTimeout(() => ic.abort(), 15000);
+          try {
+            const r = await fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd, signal: ic.signal });
+            const data = await r.json();
+            if (r.ok && inspectingRef.current) {
               setLatestResult({
                 ...data,
                 judgment: data.normalized_score > sensitivityRef.current ? 'NG' : 'OK',
               });
               drawHeatmap(overlayRef.current, data.heatmap);
-            })
-            .catch(() => {})
-            .finally(() => clearTimeout(it));
+            }
+          } catch {
+            // タイムアウト・通信エラーは次のフレームで再試行
+          } finally {
+            clearTimeout(it);
+          }
         }
-        await sleep(350);
+        await sleep(250);
       }
     }
     loop();
