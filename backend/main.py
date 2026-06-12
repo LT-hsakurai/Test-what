@@ -18,28 +18,19 @@ def health():
 
 
 @app.post("/register")
-async def register(
-    files: list[UploadFile] = File(...),
-    roi_x: float = Form(0.0),
-    roi_y: float = Form(0.0),
-    roi_w: float = Form(1.0),
-    roi_h: float = Form(1.0),
-):
+async def register(files: list[UploadFile] = File(...)):
     if len(files) < 5:
         raise HTTPException(400, "最低5枚の良品画像が必要です")
     images = [await f.read() for f in files]
-    return inspector.fit(images, (roi_x, roi_y, roi_w, roi_h))
+    return inspector.fit(images)
 
 
 @app.post("/inspect")
-async def inspect(
-    file: UploadFile = File(...),
-    match_tolerance: float = Form(0.35),
-):
+async def inspect(file: UploadFile = File(...)):
     if not inspector.is_fitted:
         raise HTTPException(400, "良品が未登録です")
     data = await file.read()
-    return inspector.predict(data, match_threshold=match_tolerance)
+    return inspector.predict(data)
 
 
 class ExplainRequest(BaseModel):

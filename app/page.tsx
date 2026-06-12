@@ -4,10 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 
 // ------------------------------------------------------------------ types --
 type Mode = 'home' | 'registering' | 'inspecting' | 'ng-detail';
-type RegisterStep = 'roi' | 'idle' | 'countdown' | 'capturing' | 'fitting' | 'done';
-
-interface ROI { x: number; y: number; w: number; h: number } // 0–1 relative coords
-const DEFAULT_ROI: ROI = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+type RegisterStep = 'idle' | 'countdown' | 'capturing' | 'fitting' | 'done';
 
 interface InspectResult {
   score: number;
@@ -15,8 +12,6 @@ interface InspectResult {
   normalized_score: number;
   judgment: 'OK' | 'NG';
   heatmap: string;
-  match_confidence: number;
-  match_roi: { x: number; y: number; w: number; h: number };
 }
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
@@ -28,10 +23,9 @@ export default function Page() {
   const [isFitted, setIsFitted] = useState(false);
 
   // register state
-  const [regStep, setRegStep] = useState<RegisterStep>('roi');
+  const [regStep, setRegStep] = useState<RegisterStep>('idle');
   const [regProgress, setRegProgress] = useState(0);
   const [countdown, setCountdown] = useState(3);
-  const [roi, setRoi] = useState<ROI>(DEFAULT_ROI);
   const [regError, setRegError] = useState('');
   const capturedFramesRef = useRef<Blob[]>([]);
 
@@ -39,7 +33,6 @@ export default function Page() {
   const [latestResult, setLatestResult] = useState<InspectResult | null>(null);
   const [lastFrameB64, setLastFrameB64] = useState('');
   const [sensitivity, setSensitivity] = useState(1.0);
-  const [matchTolerance, setMatchTolerance] = useState(0.35);
   const inspectingRef = useRef(false);
 
   // ng-detail state
@@ -84,7 +77,6 @@ export default function Page() {
     return new Promise(resolve => {
       const video = videoRef.current;
       if (!video || !video.videoWidth) return resolve(null);
-      // 長辺640px以下に圧縮してアップロードサイズを削減
       const MAX = 640;
       const scale = Math.min(1, MAX / Math.max(video.videoWidth, video.videoHeight));
       const canvas = document.createElement('canvas');
@@ -108,46 +100,34 @@ export default function Page() {
   // ---------------------------------------------------------- register flow --
   const goToRegister = useCallback(async () => {
     setMode('registering');
-    setRegStep('roi');
+    setRegStep('idle');
     setRegProgress(0);
-    setRoi(DEFAULT_ROI);
+    setRegError('');
     capturedFramesRef.current = [];
     await startCamera();
   }, [startCamera]);
 
-  const confirmRoi = useCallback((confirmed: ROI) => {
-    setRoi(confirmed);
-    setRegStep('idle');
-  }, []);
-
   const startCapture = useCallback(async () => {
-    // countdown 3→2→1
     setRegStep('countdown');
     for (let c = 3; c >= 1; c--) {
       setCountdown(c);
       await sleep(1000);
     }
 
-    // auto-capture CAPTURE_COUNT frames (full frame — backend handles crop/match)
     setRegStep('capturing');
     const frames: Blob[] = [];
     for (let i = 0; i < CAPTURE_COUNT; i++) {
-      const blob = await captureBlob(); // full frame
+      const blob = await captureBlob();
       if (blob) frames.push(blob);
       setRegProgress(i + 1);
       await sleep(200);
     }
 
-    // send full frames + ROI params to backend
     setRegStep('fitting');
     setRegError('');
     try {
       const fd = new FormData();
       frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
-      fd.append('roi_x', String(roi.x));
-      fd.append('roi_y', String(roi.y));
-      fd.append('roi_w', String(roi.w));
-      fd.append('roi_h', String(roi.h));
       const res = await fetch(`${BACKEND}/register`, { method: 'POST', body: fd });
       if (!res.ok) throw new Error(`サーバーエラー (${res.status})`);
       stopCamera();
@@ -157,7 +137,7 @@ export default function Page() {
       setRegError(e instanceof Error ? e.message : '登録に失敗しました');
       setRegStep('idle');
     }
-  }, [captureBlob, roi, stopCamera]);
+  }, [captureBlob, stopCamera]);
 
   const finishRegister = useCallback(() => {
     setRegStep('idle');
@@ -177,14 +157,13 @@ export default function Page() {
 
     async function loop() {
       while (inspectingRef.current) {
-        const blob = await captureBlob(); // full frame — backend auto-matches
+        const blob = await captureBlob();
         if (blob) {
           const b64 = await blobToB64(blob);
           setLastFrameB64(b64);
 
           const fd = new FormData();
           fd.append('file', blob, 'frame.jpg');
-          fd.append('match_tolerance', String(matchTolerance));
           fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd })
             .then(r => r.json())
             .then((data: InspectResult) => {
@@ -193,7 +172,7 @@ export default function Page() {
                 judgment: data.normalized_score > sensitivity ? 'NG' : 'OK',
               };
               setLatestResult(adjusted);
-              drawHeatmap(overlayRef.current, data.heatmap, data.match_roi, data.match_confidence);
+              drawHeatmap(overlayRef.current, data.heatmap);
             })
             .catch(() => {});
         }
@@ -249,7 +228,6 @@ export default function Page() {
     <main className="min-h-screen bg-slate-900 text-white">
       <div className="max-w-lg mx-auto px-4 pb-12 pt-8">
 
-        {/* HOME */}
         {mode === 'home' && (
           <HomeScreen
             isFitted={isFitted}
@@ -258,24 +236,19 @@ export default function Page() {
           />
         )}
 
-        {/* REGISTERING */}
         {mode === 'registering' && (
           <RegisterScreen
             videoRef={videoRef}
             regStep={regStep}
             progress={regProgress}
             countdown={countdown}
-            roi={roi}
             error={regError}
-            onRoiChange={setRoi}
-            onConfirmRoi={confirmRoi}
             onStart={startCapture}
             onFinish={finishRegister}
             onBack={() => { stopCamera(); setMode('home'); }}
           />
         )}
 
-        {/* INSPECTING */}
         {mode === 'inspecting' && (
           <InspectScreen
             videoRef={videoRef}
@@ -283,14 +256,11 @@ export default function Page() {
             result={latestResult}
             sensitivity={sensitivity}
             onSensitivityChange={setSensitivity}
-            matchTolerance={matchTolerance}
-            onMatchToleranceChange={setMatchTolerance}
             onAskClaude={askClaude}
             onBack={leaveInspect}
           />
         )}
 
-        {/* NG DETAIL */}
         {mode === 'ng-detail' && (
           <NgDetailScreen
             frameB64={lastFrameB64}
@@ -345,15 +315,12 @@ function HomeScreen({ isFitted, onRegister, onInspect }: {
   );
 }
 
-function RegisterScreen({ videoRef, regStep, progress, countdown, roi, error, onRoiChange, onConfirmRoi, onStart, onFinish, onBack }: {
+function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart, onFinish, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   regStep: RegisterStep;
   progress: number;
   countdown: number;
-  roi: ROI;
   error: string;
-  onRoiChange: (r: ROI) => void;
-  onConfirmRoi: (r: ROI) => void;
   onStart: () => void;
   onFinish: () => void;
   onBack: () => void;
@@ -369,14 +336,6 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, roi, error, on
 
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
         <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
-
-        {regStep === 'roi' && (
-          <RoiSelectorOverlay
-            roi={roi}
-            onChange={onRoiChange}
-            onConfirm={() => onConfirmRoi(roi)}
-          />
-        )}
 
         {regStep === 'countdown' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
@@ -418,15 +377,9 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, roi, error, on
         </div>
       )}
 
-      {regStep === 'roi' && (
-        <p className="text-slate-400 text-sm text-center">
-          白い枠をドラッグして検査対象の範囲を選んでください
-        </p>
-      )}
-
       {regStep === 'idle' && (
         <div className="space-y-3">
-          <p className="text-slate-300 text-sm text-center">良品を枠内に置いてください。ボタンを押すと3秒後に自動撮影が始まります。</p>
+          <p className="text-slate-300 text-sm text-center">良品をカメラに向けてください。ボタンを押すと3秒後に自動撮影が始まります。</p>
           {error ? (
             <div className="bg-red-900/50 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
               ⚠ {error}
@@ -449,14 +402,12 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, roi, error, on
   );
 }
 
-function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, matchTolerance, onMatchToleranceChange, onAskClaude, onBack }: {
+function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, onAskClaude, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   overlayRef: React.RefObject<HTMLCanvasElement | null>;
   result: InspectResult | null;
   sensitivity: number;
   onSensitivityChange: (v: number) => void;
-  matchTolerance: number;
-  onMatchToleranceChange: (v: number) => void;
   onAskClaude: () => void;
   onBack: () => void;
 }) {
@@ -477,7 +428,6 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
         )}
       </div>
 
-      {/* Video + heatmap overlay */}
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
         <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-cover" />
         <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
@@ -488,7 +438,6 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
         )}
       </div>
 
-      {/* Score bar */}
       {result && (
         <div>
           <div className="flex justify-between text-sm mb-1">
@@ -509,24 +458,6 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
         </div>
       )}
 
-      {/* Match tolerance slider */}
-      <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
-        <div className="flex justify-between text-xs text-slate-400">
-          <span>マッチング許容度</span>
-          <span className="font-medium text-white">{matchTolerance.toFixed(2)}</span>
-        </div>
-        <input
-          type="range" min={0.1} max={0.9} step={0.05}
-          value={matchTolerance}
-          onChange={e => onMatchToleranceChange(Number(e.target.value))}
-          className="w-full accent-emerald-500"
-        />
-        <div className="flex justify-between text-xs text-slate-500">
-          <span>緩い（ズレ許容）</span><span>厳しい（完全一致）</span>
-        </div>
-      </div>
-
-      {/* Sensitivity slider */}
       <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
         <div className="flex justify-between text-xs text-slate-400">
           <span>検出感度</span>
@@ -546,7 +477,6 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
         </div>
       </div>
 
-      {/* NG button */}
       {isNG && (
         <button onClick={onAskClaude}
           className="w-full flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 py-4 rounded-2xl font-semibold text-lg transition-colors animate-pulse">
@@ -554,15 +484,6 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
         </button>
       )}
 
-      {/* Match confidence */}
-      {result && (
-        <div className="flex items-center justify-between text-xs px-1">
-          <span className="text-slate-500">製品マッチング</span>
-          <span className={`font-medium ${result.match_confidence >= 0.35 ? 'text-emerald-400' : 'text-yellow-400'}`}>
-            {result.match_confidence >= 0.35 ? '✓ 自動位置合わせ' : '⚠ ROI固定'} ({(result.match_confidence * 100).toFixed(0)}%)
-          </span>
-        </div>
-      )}
       <p className="text-slate-500 text-xs text-center">赤いヒートマップが異常箇所を示します</p>
     </div>
   );
@@ -592,7 +513,7 @@ function NgDetailScreen({ frameB64, result, explanation, explaining, onBack, onH
           className="w-full rounded-2xl object-cover max-h-64" />
       )}
 
-      <div className={`rounded-2xl p-4 text-center bg-red-900/40 border border-red-800`}>
+      <div className="rounded-2xl p-4 text-center bg-red-900/40 border border-red-800">
         <p className="text-3xl font-black text-red-400 tracking-widest">NG</p>
         <p className="text-slate-300 text-sm mt-1">
           異常スコア: 良品基準の <span className="font-bold text-red-300">{result.normalized_score.toFixed(1)}倍</span>
@@ -627,12 +548,7 @@ function NgDetailScreen({ frameB64, result, explanation, explaining, onBack, onH
 
 // ================================================================= helpers ==
 
-function drawHeatmap(
-  canvas: HTMLCanvasElement | null,
-  b64: string,
-  roi?: { x: number; y: number; w: number; h: number },
-  matchConfidence?: number,
-) {
+function drawHeatmap(canvas: HTMLCanvasElement | null, b64: string) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
@@ -641,37 +557,8 @@ function drawHeatmap(
     const cw = canvas.width || 640;
     const ch = canvas.height || 480;
     ctx.clearRect(0, 0, cw, ch);
-
-    if (roi) {
-      const rx = roi.x * cw, ry = roi.y * ch, rw = roi.w * cw, rh = roi.h * ch;
-
-      // heatmap inside ROI
-      ctx.globalAlpha = 0.65;
-      ctx.drawImage(img, rx, ry, rw, rh);
-
-      // ROI border (green = matched, yellow = fallback)
-      const matched = (matchConfidence ?? 0) >= 0.35;
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = matched ? '#4ADE80' : '#FACC15';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(rx, ry, rw, rh);
-
-      // corner accents
-      const len = Math.min(rw, rh) * 0.12;
-      ctx.lineWidth = 3;
-      [[rx, ry, 1, 1], [rx + rw, ry, -1, 1], [rx, ry + rh, 1, -1], [rx + rw, ry + rh, -1, -1]].forEach(
-        ([x, y, sx, sy]) => {
-          ctx.beginPath();
-          ctx.moveTo(x + sx * len, y);
-          ctx.lineTo(x, y);
-          ctx.lineTo(x, y + sy * len);
-          ctx.stroke();
-        },
-      );
-    } else {
-      ctx.globalAlpha = 0.65;
-      ctx.drawImage(img, 0, 0, cw, ch);
-    }
+    ctx.globalAlpha = 0.65;
+    ctx.drawImage(img, 0, 0, cw, ch);
   };
   img.src = `data:image/png;base64,${b64}`;
 }
@@ -689,132 +576,6 @@ function sleep(ms: number) {
 }
 
 // =================================================================== icons ==
-// ============================================================= ROI selector ==
-
-function RoiSelectorOverlay({ roi, onChange, onConfirm }: {
-  roi: ROI;
-  onChange: (r: ROI) => void;
-  onConfirm: () => void;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  type Handle = 'tl' | 'tr' | 'bl' | 'br' | 'move';
-  const dragRef = useRef<{ handle: Handle; startX: number; startY: number; startRoi: ROI } | null>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d')!;
-    const cw = canvas.width, ch = canvas.height;
-    ctx.clearRect(0, 0, cw, ch);
-
-    const rx = roi.x * cw, ry = roi.y * ch, rw = roi.w * cw, rh = roi.h * ch;
-
-    // Dark overlay with clear ROI cutout
-    ctx.fillStyle = 'rgba(0,0,0,0.55)';
-    ctx.fillRect(0, 0, cw, ch);
-    ctx.clearRect(rx, ry, rw, rh);
-
-    // ROI border
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(rx, ry, rw, rh);
-
-    // Corner handles
-    ([
-      [rx, ry], [rx + rw, ry], [rx, ry + rh], [rx + rw, ry + rh],
-    ] as [number, number][]).forEach(([x, y]) => {
-      ctx.beginPath();
-      ctx.arc(x, y, 14, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(255,255,255,0.9)';
-      ctx.fill();
-      ctx.strokeStyle = '#2563EB';
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-    });
-  }, [roi]);
-
-  const relPos = (e: React.TouchEvent<HTMLCanvasElement>, t: React.Touch) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    return { x: (t.clientX - r.left) / r.width, y: (t.clientY - r.top) / r.height };
-  };
-
-  const onTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const p = relPos(e, e.touches[0] as unknown as React.Touch);
-    const R = 0.07;
-    const corners: [Handle, number, number][] = [
-      ['tl', roi.x, roi.y], ['tr', roi.x + roi.w, roi.y],
-      ['bl', roi.x, roi.y + roi.h], ['br', roi.x + roi.w, roi.y + roi.h],
-    ];
-    for (const [h, cx, cy] of corners) {
-      if (Math.hypot(p.x - cx, p.y - cy) < R) {
-        dragRef.current = { handle: h, startX: p.x, startY: p.y, startRoi: { ...roi } };
-        return;
-      }
-    }
-    if (p.x > roi.x && p.x < roi.x + roi.w && p.y > roi.y && p.y < roi.y + roi.h) {
-      dragRef.current = { handle: 'move', startX: p.x, startY: p.y, startRoi: { ...roi } };
-    }
-  };
-
-  const onTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const d = dragRef.current;
-    if (!d) return;
-    const p = relPos(e, e.touches[0] as unknown as React.Touch);
-    const dx = p.x - d.startX, dy = p.y - d.startY;
-    const s = d.startRoi;
-    const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-    const MIN = 0.1;
-    let r = { ...s };
-
-    if (d.handle === 'move') {
-      r.x = clamp(s.x + dx, 0, 1 - s.w);
-      r.y = clamp(s.y + dy, 0, 1 - s.h);
-    } else if (d.handle === 'tl') {
-      r.x = clamp(s.x + dx, 0, s.x + s.w - MIN);
-      r.y = clamp(s.y + dy, 0, s.y + s.h - MIN);
-      r.w = s.w - (r.x - s.x); r.h = s.h - (r.y - s.y);
-    } else if (d.handle === 'tr') {
-      r.y = clamp(s.y + dy, 0, s.y + s.h - MIN);
-      r.w = clamp(s.w + dx, MIN, 1 - s.x);
-      r.h = s.h - (r.y - s.y);
-    } else if (d.handle === 'bl') {
-      r.x = clamp(s.x + dx, 0, s.x + s.w - MIN);
-      r.w = s.w - (r.x - s.x);
-      r.h = clamp(s.h + dy, MIN, 1 - s.y);
-    } else if (d.handle === 'br') {
-      r.w = clamp(s.w + dx, MIN, 1 - s.x);
-      r.h = clamp(s.h + dy, MIN, 1 - s.y);
-    }
-    onChange(r);
-  };
-
-  const onTouchEnd = () => { dragRef.current = null; };
-
-  return (
-    <>
-      <canvas
-        ref={canvasRef}
-        width={640} height={480}
-        className="absolute inset-0 w-full h-full touch-none"
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-      />
-      <div className="absolute bottom-3 left-3 right-3 flex gap-2">
-        <button onClick={() => onChange(DEFAULT_ROI)}
-          className="flex-1 bg-slate-700/90 text-white py-2.5 rounded-xl text-sm font-semibold">
-          リセット
-        </button>
-        <button onClick={onConfirm}
-          className="flex-1 bg-blue-600/90 text-white py-2.5 rounded-xl text-sm font-semibold">
-          この範囲に決定 →
-        </button>
-      </div>
-    </>
-  );
-}
 
 function RegisterIcon() {
   return <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" /><line x1="4" y1="22" x2="4" y2="15" /></svg>;
