@@ -68,6 +68,9 @@ class PatchCoreInspector:
         return feats[0].permute(1, 2, 0).reshape(-1, C)
 
     def fit(self, images: list[bytes]) -> dict:
+        import time
+        t0 = time.time()
+
         patches_list = []
         for img_bytes in images:
             tensor = self._preprocess(img_bytes)
@@ -82,11 +85,19 @@ class PatchCoreInspector:
         self.feature_bank = bank
         self.is_fitted = True
 
-        scores = [self._score(img_bytes) for img_bytes in images]
+        # 閾値計算は抽出済み特徴量を再利用（再抽出すると学習時間が2倍になる）
+        scores = []
+        for patches in patches_list:
+            dist = torch.cdist(patches, bank)
+            scores.append(float(dist.min(dim=1).values.max()))
         self.threshold = float(np.percentile(scores, 99)) * 1.25
         self._save()
 
-        return {"bank_size": int(bank.shape[0]), "threshold": round(self.threshold, 4)}
+        return {
+            "bank_size": int(bank.shape[0]),
+            "threshold": round(self.threshold, 4),
+            "fit_seconds": round(time.time() - t0, 1),
+        }
 
     def _score(self, img_bytes: bytes) -> float:
         tensor = self._preprocess(img_bytes)

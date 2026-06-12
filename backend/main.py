@@ -22,7 +22,10 @@ async def register(files: list[UploadFile] = File(...)):
     if len(files) < 5:
         raise HTTPException(400, "最低5枚の良品画像が必要です")
     images = [await f.read() for f in files]
-    return inspector.fit(images)
+    try:
+        return inspector.fit(images)
+    except Exception as e:
+        raise HTTPException(500, f"学習に失敗しました: {e}")
 
 
 @app.post("/inspect")

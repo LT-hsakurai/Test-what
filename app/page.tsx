@@ -15,7 +15,7 @@ interface InspectResult {
 }
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
-const CAPTURE_COUNT = 20;
+const CAPTURE_COUNT = 10;
 
 // ================================================================== page ==
 export default function Page() {
@@ -97,6 +97,7 @@ export default function Page() {
     setRegStep('idle');
     setRegProgress(0);
     setRegError('');
+    fetch(`${BACKEND}/health`).catch(() => {}); // バックエンドを事前に起こしておく
     await startCamera();
   }, [startCamera]);
 
