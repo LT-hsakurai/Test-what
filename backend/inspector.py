@@ -95,7 +95,7 @@ class PatchCoreInspector:
         dist = torch.cdist(patches, self.feature_bank)
         return float(dist.min(dim=1).values.max())
 
-    def predict(self, img_bytes: bytes) -> dict:
+    def predict(self, img_bytes: bytes, heat_threshold: float = 0.5) -> dict:
         if not self.is_fitted:
             raise RuntimeError("良品が未登録です")
 
@@ -116,21 +116,25 @@ class PatchCoreInspector:
             "threshold": round(self.threshold, 4),
             "normalized_score": round(normalized, 3),
             "judgment": judgment,
-            "heatmap": self._colorize(anomaly_map),
+            "heatmap": self._colorize(anomaly_map, heat_threshold),
         }
 
-    def _colorize(self, anomaly_map: np.ndarray) -> str:
-        am = anomaly_map.astype(np.float32)
-        if am.max() > am.min():
-            am_n = (am - am.min()) / (am.max() - am.min())
-        else:
-            am_n = np.zeros_like(am)
+    def _colorize(self, anomaly_map: np.ndarray, cutoff: float = 0.5) -> str:
+        # 学習した閾値を基準に正規化（1.0 = NG境界）。フレームごとの min-max では
+        # なく絶対基準なので、良品フレームでは赤が出ない。
+        thr = self.threshold if self.threshold and self.threshold > 0 else float(anomaly_map.max() + 1e-9)
+        rel = anomaly_map.astype(np.float32) / thr
 
-        am_u8 = (am_n * 255).astype(np.uint8)
+        # 色（重症度）: 0〜1.5倍を JET にマッピング
+        severity = np.clip(rel / 1.5, 0, 1)
+        am_u8 = (severity * 255).astype(np.uint8)
         bgr = cv2.applyColorMap(am_u8, cv2.COLORMAP_JET)
         rgba = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGBA)
-        alpha = np.clip((am_n - 0.2) * (255 / 0.8), 0, 200).astype(np.uint8)
-        rgba[:, :, 3] = alpha
+
+        # 透明度: cutoff 未満は透明、そこから 0.6倍ぶんでフェードイン
+        visibility = np.clip((rel - cutoff) / 0.6, 0, 1)
+        rgba[:, :, 3] = (visibility * 200).astype(np.uint8)
+
         rgba = cv2.resize(rgba, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
         _, buf = cv2.imencode(".png", rgba)
         return base64.b64encode(buf.tobytes()).decode()

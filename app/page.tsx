@@ -32,7 +32,13 @@ export default function Page() {
   const [latestResult, setLatestResult] = useState<InspectResult | null>(null);
   const [lastFrameB64, setLastFrameB64] = useState('');
   const [sensitivity, setSensitivity] = useState(1.0);
+  const [heatThreshold, setHeatThreshold] = useState(0.5);
   const inspectingRef = useRef(false);
+  // 長時間ループが最新値を読めるよう ref に同期
+  const sensitivityRef = useRef(sensitivity);
+  const heatThresholdRef = useRef(heatThreshold);
+  useEffect(() => { sensitivityRef.current = sensitivity; }, [sensitivity]);
+  useEffect(() => { heatThresholdRef.current = heatThreshold; }, [heatThreshold]);
 
   // ng-detail state
   const [explanation, setExplanation] = useState('');
@@ -160,6 +166,7 @@ export default function Page() {
 
           const fd = new FormData();
           fd.append('file', blob, 'frame.jpg');
+          fd.append('heat_threshold', String(heatThresholdRef.current));
           const ic = new AbortController();
           const it = setTimeout(() => ic.abort(), 8000);
           fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd, signal: ic.signal })
@@ -167,7 +174,7 @@ export default function Page() {
             .then((data: InspectResult) => {
               setLatestResult({
                 ...data,
-                judgment: data.normalized_score > sensitivity ? 'NG' : 'OK',
+                judgment: data.normalized_score > sensitivityRef.current ? 'NG' : 'OK',
               });
               drawHeatmap(overlayRef.current, data.heatmap);
             })
@@ -261,6 +268,8 @@ export default function Page() {
             result={latestResult}
             sensitivity={sensitivity}
             onSensitivityChange={setSensitivity}
+            heatThreshold={heatThreshold}
+            onHeatThresholdChange={setHeatThreshold}
             onAskClaude={askClaude}
             onBack={leaveInspect}
           />
@@ -397,12 +406,14 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart
   );
 }
 
-function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, onAskClaude, onBack }: {
+function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, heatThreshold, onHeatThresholdChange, onAskClaude, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   overlayRef: React.RefObject<HTMLCanvasElement | null>;
   result: InspectResult | null;
   sensitivity: number;
   onSensitivityChange: (v: number) => void;
+  heatThreshold: number;
+  onHeatThresholdChange: (v: number) => void;
   onAskClaude: () => void;
   onBack: () => void;
 }) {
@@ -447,7 +458,7 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
 
       <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
         <div className="flex justify-between text-xs text-slate-400">
-          <span>検出感度</span>
+          <span>検出感度（OK/NG判定）</span>
           <span className="font-medium text-white">
             {sensitivity <= 0.7 ? '高（敏感）' : sensitivity >= 1.5 ? '低（鈍感）' : '標準'}
             {' '}({sensitivity.toFixed(1)}x)
@@ -458,6 +469,19 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
           className="w-full accent-blue-500" />
         <div className="flex justify-between text-xs text-slate-500">
           <span>敏感</span><span>鈍感</span>
+        </div>
+      </div>
+
+      <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
+        <div className="flex justify-between text-xs text-slate-400">
+          <span>ヒートマップ閾値（赤の表示範囲）</span>
+          <span className="font-medium text-white">{heatThreshold.toFixed(2)}</span>
+        </div>
+        <input type="range" min={0.1} max={1.2} step={0.05}
+          value={heatThreshold} onChange={e => onHeatThresholdChange(Number(e.target.value))}
+          className="w-full accent-rose-500" />
+        <div className="flex justify-between text-xs text-slate-500">
+          <span>広く赤く</span><span>強い異常だけ</span>
         </div>
       </div>
 
