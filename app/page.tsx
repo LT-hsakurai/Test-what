@@ -125,17 +125,27 @@ export default function Page() {
 
     setRegStep('fitting');
     setRegError('');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90000);
     try {
       const fd = new FormData();
       frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
-      const res = await fetch(`${BACKEND}/register`, { method: 'POST', body: fd });
-      if (!res.ok) throw new Error(`サーバーエラー (${res.status})`);
+      const res = await fetch(`${BACKEND}/register`, { method: 'POST', body: fd, signal: controller.signal });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail ?? `サーバーエラー (${res.status})`);
+      }
       stopCamera();
       setIsFitted(true);
       setRegStep('done');
     } catch (e) {
-      setRegError(e instanceof Error ? e.message : '登録に失敗しました');
+      const msg = e instanceof Error && e.name === 'AbortError'
+        ? '登録がタイムアウトしました（90秒）。バックエンドが起動中の可能性があるため、少し待って再試行してください。'
+        : (e instanceof Error ? e.message : '登録に失敗しました');
+      setRegError(msg);
       setRegStep('idle');
+    } finally {
+      clearTimeout(timer);
     }
   }, [captureBlob, stopCamera]);
 
@@ -164,7 +174,9 @@ export default function Page() {
 
           const fd = new FormData();
           fd.append('file', blob, 'frame.jpg');
-          fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd })
+          const ic = new AbortController();
+          const it = setTimeout(() => ic.abort(), 8000);
+          fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd, signal: ic.signal })
             .then(r => r.json())
             .then((data: InspectResult) => {
               const adjusted: InspectResult = {
@@ -174,7 +186,8 @@ export default function Page() {
               setLatestResult(adjusted);
               drawHeatmap(overlayRef.current, data.heatmap);
             })
-            .catch(() => {});
+            .catch(() => {})
+            .finally(() => clearTimeout(it));
         }
         await sleep(350);
       }
