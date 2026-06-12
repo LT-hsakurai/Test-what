@@ -32,6 +32,7 @@ export default function Page() {
   const [regProgress, setRegProgress] = useState(0);
   const [countdown, setCountdown] = useState(3);
   const [roi, setRoi] = useState<ROI>(DEFAULT_ROI);
+  const [regError, setRegError] = useState('');
   const capturedFramesRef = useRef<Blob[]>([]);
 
   // inspect state
@@ -79,26 +80,18 @@ export default function Page() {
     streamRef.current = null;
   }, []);
 
-  const captureBlob = useCallback((cropRoi?: ROI): Promise<Blob | null> => {
+  const captureBlob = useCallback((): Promise<Blob | null> => {
     return new Promise(resolve => {
       const video = videoRef.current;
       if (!video || !video.videoWidth) return resolve(null);
+      // 長辺640px以下に圧縮してアップロードサイズを削減
+      const MAX = 640;
+      const scale = Math.min(1, MAX / Math.max(video.videoWidth, video.videoHeight));
       const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d')!;
-      if (cropRoi) {
-        const sx = Math.round(cropRoi.x * video.videoWidth);
-        const sy = Math.round(cropRoi.y * video.videoHeight);
-        const sw = Math.round(cropRoi.w * video.videoWidth);
-        const sh = Math.round(cropRoi.h * video.videoHeight);
-        canvas.width = sw;
-        canvas.height = sh;
-        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, sw, sh);
-      } else {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
-      }
-      canvas.toBlob(b => resolve(b), 'image/jpeg', 0.85);
+      canvas.width  = Math.round(video.videoWidth  * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
+      canvas.getContext('2d')!.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(b => resolve(b), 'image/jpeg', 0.82);
     });
   }, []);
 
@@ -147,18 +140,24 @@ export default function Page() {
 
     // send full frames + ROI params to backend
     setRegStep('fitting');
-    const fd = new FormData();
-    frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
-    fd.append('roi_x', String(roi.x));
-    fd.append('roi_y', String(roi.y));
-    fd.append('roi_w', String(roi.w));
-    fd.append('roi_h', String(roi.h));
-    await fetch(`${BACKEND}/register`, { method: 'POST', body: fd });
-
-    stopCamera();
-    setIsFitted(true);
-    setRegStep('done');
-  }, [captureBlob, stopCamera]);
+    setRegError('');
+    try {
+      const fd = new FormData();
+      frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
+      fd.append('roi_x', String(roi.x));
+      fd.append('roi_y', String(roi.y));
+      fd.append('roi_w', String(roi.w));
+      fd.append('roi_h', String(roi.h));
+      const res = await fetch(`${BACKEND}/register`, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(`サーバーエラー (${res.status})`);
+      stopCamera();
+      setIsFitted(true);
+      setRegStep('done');
+    } catch (e) {
+      setRegError(e instanceof Error ? e.message : '登録に失敗しました');
+      setRegStep('idle');
+    }
+  }, [captureBlob, roi, stopCamera]);
 
   const finishRegister = useCallback(() => {
     setRegStep('idle');
@@ -220,18 +219,24 @@ export default function Page() {
     setExplaining(true);
     setExplanation('');
 
-    const res = await fetch('/api/explain', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        image_base64: lastFrameB64,
-        normalized_score: latestResult.normalized_score,
-        judgment: latestResult.judgment,
-      }),
-    });
-    const data = await res.json();
-    setExplanation(data.explanation ?? 'エラーが発生しました');
-    setExplaining(false);
+    try {
+      const res = await fetch('/api/explain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_base64: lastFrameB64,
+          normalized_score: latestResult.normalized_score,
+          judgment: latestResult.judgment,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error ?? `エラー (${res.status})`);
+      setExplanation(data.explanation);
+    } catch (e) {
+      setExplanation('説明の取得に失敗しました: ' + (e instanceof Error ? e.message : '不明なエラー'));
+    } finally {
+      setExplaining(false);
+    }
   }, [latestResult, lastFrameB64, stopCamera]);
 
   const backToInspect = useCallback(async () => {
@@ -261,6 +266,7 @@ export default function Page() {
             progress={regProgress}
             countdown={countdown}
             roi={roi}
+            error={regError}
             onRoiChange={setRoi}
             onConfirmRoi={confirmRoi}
             onStart={startCapture}
@@ -339,12 +345,13 @@ function HomeScreen({ isFitted, onRegister, onInspect }: {
   );
 }
 
-function RegisterScreen({ videoRef, regStep, progress, countdown, roi, onRoiChange, onConfirmRoi, onStart, onFinish, onBack }: {
+function RegisterScreen({ videoRef, regStep, progress, countdown, roi, error, onRoiChange, onConfirmRoi, onStart, onFinish, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   regStep: RegisterStep;
   progress: number;
   countdown: number;
   roi: ROI;
+  error: string;
   onRoiChange: (r: ROI) => void;
   onConfirmRoi: (r: ROI) => void;
   onStart: () => void;
@@ -420,9 +427,14 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, roi, onRoiChan
       {regStep === 'idle' && (
         <div className="space-y-3">
           <p className="text-slate-300 text-sm text-center">良品を枠内に置いてください。ボタンを押すと3秒後に自動撮影が始まります。</p>
+          {error ? (
+            <div className="bg-red-900/50 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
+              ⚠ {error}
+            </div>
+          ) : null}
           <button onClick={onStart}
             className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-2xl font-semibold text-lg transition-colors">
-            撮影開始
+            {error ? '再試行' : '撮影開始'}
           </button>
         </div>
       )}
