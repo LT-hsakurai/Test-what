@@ -443,8 +443,11 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
         <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-cover" />
         <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
-        {!result && <div className="absolute inset-0 flex items-center justify-center"><Spinner size="sm" /></div>}
       </div>
+
+      {!result && (
+        <p className="text-slate-400 text-sm text-center">解析待ち… 最初の結果まで数秒かかります</p>
+      )}
 
       {result && (
         <div>

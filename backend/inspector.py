@@ -85,12 +85,15 @@ class PatchCoreInspector:
         self.feature_bank = bank
         self.is_fitted = True
 
-        # 閾値計算は抽出済み特徴量を再利用（再抽出すると学習時間が2倍になる）
+        # 閾値は leave-one-out で計算: 各フレームを「自分以外のフレームのパッチ」
+        # と比較する。自分自身を含むバンクと比較すると距離が常にほぼ0になり、
+        # 閾値が極小化して全フレームがNG判定になってしまう。
         scores = []
-        for patches in patches_list:
-            dist = torch.cdist(patches, bank)
+        for i, patches in enumerate(patches_list):
+            others = torch.cat([p for j, p in enumerate(patches_list) if j != i], dim=0)
+            dist = torch.cdist(patches, others)
             scores.append(float(dist.min(dim=1).values.max()))
-        self.threshold = float(np.percentile(scores, 99)) * 1.25
+        self.threshold = max(float(np.percentile(scores, 99)) * 1.25, 1e-6)
         self._save()
 
         return {
