@@ -20,6 +20,7 @@ class PatchCoreInspector:
         self.feature_bank: torch.Tensor | None = None
         self.threshold: float | None = None
         self.is_fitted = False
+        self.reference_image: bytes | None = None
 
         self.transform = T.Compose([
             T.Resize((IMG_SIZE, IMG_SIZE)),
@@ -39,7 +40,11 @@ class PatchCoreInspector:
 
     def _save(self):
         with open(SAVE_PATH, "wb") as f:
-            pickle.dump({"bank": self.feature_bank.cpu(), "threshold": self.threshold}, f)
+            pickle.dump({
+                "bank": self.feature_bank.cpu(),
+                "threshold": self.threshold,
+                "reference_image": self.reference_image,
+            }, f)
 
     def _load(self):
         if SAVE_PATH.exists():
@@ -48,6 +53,7 @@ class PatchCoreInspector:
                     s = pickle.load(f)
                 self.feature_bank = s["bank"].to(self.device)
                 self.threshold = s["threshold"]
+                self.reference_image = s.get("reference_image", None)
                 self.is_fitted = True
             except Exception:
                 pass  # 古い形式のファイルは無視
@@ -84,6 +90,7 @@ class PatchCoreInspector:
 
         self.feature_bank = bank
         self.is_fitted = True
+        self.reference_image = images[len(images) // 2]  # 中央フレームを良品参照として保存
 
         # 閾値は leave-one-out で計算: 各フレームを「自分以外のフレームのパッチ」
         # と比較する。自分自身を含むバンクと比較すると距離が常にほぼ0になり、

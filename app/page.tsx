@@ -211,6 +211,13 @@ export default function Page() {
     setExplaining(true);
     setExplanation('');
 
+    // 参照画像を取得（失敗しても分析は続行）
+    let reference_base64: string | null = null;
+    try {
+      const refRes = await fetch(`${BACKEND}/reference`);
+      if (refRes.ok) ({ image_base64: reference_base64 } = await refRes.json());
+    } catch { /* なければ参照画像なしで送る */ }
+
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 25000);
     let res: Response;
@@ -220,6 +227,8 @@ export default function Page() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           image_base64: lastFrameB64,
+          heatmap_base64: latestResult.heatmap,
+          reference_base64,
           normalized_score: latestResult.normalized_score,
           judgment: latestResult.judgment,
         }),

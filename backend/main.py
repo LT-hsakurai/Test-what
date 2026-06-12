@@ -1,4 +1,5 @@
 import os
+import base64
 import anthropic
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,13 @@ async def register(files: list[UploadFile] = File(...)):
         return inspector.fit(images)
     except Exception as e:
         raise HTTPException(500, f"学習に失敗しました: {e}")
+
+
+@app.get("/reference")
+def reference():
+    if not inspector.reference_image:
+        raise HTTPException(404, "参照画像がありません。良品を再登録してください。")
+    return {"image_base64": base64.b64encode(inspector.reference_image).decode()}
 
 
 @app.post("/inspect")
