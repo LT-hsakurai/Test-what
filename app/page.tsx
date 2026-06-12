@@ -4,7 +4,9 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 
 // ------------------------------------------------------------------ types --
 type Mode = 'home' | 'registering' | 'inspecting' | 'ng-detail';
-type RegisterStep = 'idle' | 'countdown' | 'capturing' | 'fitting' | 'done';
+type RegisterStep = 'idle' | 'segmenting' | 'contour' | 'countdown' | 'capturing' | 'fitting' | 'done';
+
+interface Vertex { x: number; y: number }
 
 interface InspectResult {
   score: number;
@@ -27,7 +29,8 @@ export default function Page() {
   const [regProgress, setRegProgress] = useState(0);
   const [countdown, setCountdown] = useState(3);
   const [regError, setRegError] = useState('');
-  const capturedFramesRef = useRef<Blob[]>([]);
+  const [snapshotUrl, setSnapshotUrl] = useState('');
+  const [contourVertices, setContourVertices] = useState<Vertex[]>([]);
 
   // inspect state
   const [latestResult, setLatestResult] = useState<InspectResult | null>(null);
@@ -44,7 +47,6 @@ export default function Page() {
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
-  // backend health check on mount
   useEffect(() => {
     fetch(`${BACKEND}/health`)
       .then(r => r.json())
@@ -87,25 +89,44 @@ export default function Page() {
     });
   }, []);
 
-  const captureB64 = useCallback((): string => {
-    const video = videoRef.current;
-    if (!video || !video.videoWidth) return '';
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d')!.drawImage(video, 0, 0);
-    return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-  }, []);
-
   // ---------------------------------------------------------- register flow --
   const goToRegister = useCallback(async () => {
     setMode('registering');
     setRegStep('idle');
     setRegProgress(0);
     setRegError('');
-    capturedFramesRef.current = [];
+    setSnapshotUrl('');
+    setContourVertices([]);
     await startCamera();
   }, [startCamera]);
+
+  const doSegment = useCallback(async () => {
+    const blob = await captureBlob();
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    setSnapshotUrl(url);
+    setRegStep('segmenting');
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const fd = new FormData();
+      fd.append('file', blob, 'snapshot.jpg');
+      const res = await fetch(`${BACKEND}/segment`, { method: 'POST', body: fd, signal: controller.signal });
+      if (!res.ok) throw new Error();
+      const data = await res.json();
+      setContourVertices(data.vertices);
+    } catch {
+      // Fallback to center bounding box
+      setContourVertices([
+        { x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 },
+        { x: 0.85, y: 0.85 }, { x: 0.15, y: 0.85 },
+      ]);
+    } finally {
+      clearTimeout(timer);
+      setRegStep('contour');
+    }
+  }, [captureBlob]);
 
   const startCapture = useCallback(async () => {
     setRegStep('countdown');
@@ -130,6 +151,9 @@ export default function Page() {
     try {
       const fd = new FormData();
       frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
+      if (contourVertices.length >= 3) {
+        fd.append('contour', JSON.stringify(contourVertices));
+      }
       const res = await fetch(`${BACKEND}/register`, { method: 'POST', body: fd, signal: controller.signal });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -140,17 +164,16 @@ export default function Page() {
       setRegStep('done');
     } catch (e) {
       const msg = e instanceof Error && e.name === 'AbortError'
-        ? '登録がタイムアウトしました（90秒）。バックエンドが起動中の可能性があるため、少し待って再試行してください。'
+        ? '登録がタイムアウトしました（90秒）。少し待って再試行してください。'
         : (e instanceof Error ? e.message : '登録に失敗しました');
       setRegError(msg);
       setRegStep('idle');
     } finally {
       clearTimeout(timer);
     }
-  }, [captureBlob, stopCamera]);
+  }, [captureBlob, contourVertices, stopCamera]);
 
   const finishRegister = useCallback(() => {
-    setRegStep('idle');
     setMode('home');
   }, []);
 
@@ -179,11 +202,10 @@ export default function Page() {
           fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd, signal: ic.signal })
             .then(r => r.json())
             .then((data: InspectResult) => {
-              const adjusted: InspectResult = {
+              setLatestResult({
                 ...data,
                 judgment: data.normalized_score > sensitivity ? 'NG' : 'OK',
-              };
-              setLatestResult(adjusted);
+              });
               drawHeatmap(overlayRef.current, data.heatmap);
             })
             .catch(() => {})
@@ -211,24 +233,24 @@ export default function Page() {
     setExplaining(true);
     setExplanation('');
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    let res: Response;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 25000);
-      let res: Response;
-      try {
-        res = await fetch('/api/explain', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            image_base64: lastFrameB64,
-            normalized_score: latestResult.normalized_score,
-            judgment: latestResult.judgment,
-          }),
-          signal: controller.signal,
-        });
-      } finally {
-        clearTimeout(timer);
-      }
+      res = await fetch('/api/explain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_base64: lastFrameB64,
+          normalized_score: latestResult.normalized_score,
+          judgment: latestResult.judgment,
+        }),
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    try {
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error ?? `エラー (${res.status})`);
       setExplanation(data.explanation);
@@ -253,11 +275,7 @@ export default function Page() {
       <div className="max-w-lg mx-auto px-4 pb-12 pt-8">
 
         {mode === 'home' && (
-          <HomeScreen
-            isFitted={isFitted}
-            onRegister={goToRegister}
-            onInspect={goToInspect}
-          />
+          <HomeScreen isFitted={isFitted} onRegister={goToRegister} onInspect={goToInspect} />
         )}
 
         {mode === 'registering' && (
@@ -267,7 +285,11 @@ export default function Page() {
             progress={regProgress}
             countdown={countdown}
             error={regError}
-            onStart={startCapture}
+            snapshotUrl={snapshotUrl}
+            contourVertices={contourVertices}
+            onContourChange={setContourVertices}
+            onSegment={doSegment}
+            onConfirmContour={startCapture}
             onFinish={finishRegister}
             onBack={() => { stopCamera(); setMode('home'); }}
           />
@@ -304,9 +326,7 @@ export default function Page() {
 // ================================================================ screens ==
 
 function HomeScreen({ isFitted, onRegister, onInspect }: {
-  isFitted: boolean;
-  onRegister: () => void;
-  onInspect: () => void;
+  isFitted: boolean; onRegister: () => void; onInspect: () => void;
 }) {
   return (
     <div className="space-y-6">
@@ -314,22 +334,18 @@ function HomeScreen({ isFitted, onRegister, onInspect }: {
         <h1 className="text-3xl font-bold">外観検査</h1>
         <p className="text-slate-400 text-sm mt-1">PatchCore + Claude Vision</p>
       </div>
-
       <div className={`flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-medium ${isFitted ? 'bg-green-900/50 text-green-300' : 'bg-slate-800 text-slate-400'}`}>
         <span className={`w-2 h-2 rounded-full ${isFitted ? 'bg-green-400' : 'bg-slate-500'}`} />
         {isFitted ? '良品モデル: 登録済み ✓' : '良品モデル: 未登録'}
       </div>
-
       <button onClick={onRegister}
         className="w-full flex items-center justify-center gap-3 bg-blue-600 hover:bg-blue-500 active:bg-blue-700 py-5 rounded-2xl font-semibold text-lg transition-colors">
         <RegisterIcon /> 良品を登録する
       </button>
-
       <button onClick={onInspect} disabled={!isFitted}
         className="w-full flex items-center justify-center gap-3 py-5 rounded-2xl font-semibold text-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700">
         <ScanIcon /> 検査を開始する
       </button>
-
       <div className="rounded-xl bg-slate-800/60 p-4 text-slate-400 text-sm space-y-1">
         <p>① 良品を登録 → AIが正常状態を学習</p>
         <p>② 検査開始 → カメラ映像にヒートマップを重ねて表示</p>
@@ -339,27 +355,51 @@ function HomeScreen({ isFitted, onRegister, onInspect }: {
   );
 }
 
-function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart, onFinish, onBack }: {
+function RegisterScreen({ videoRef, regStep, progress, countdown, error, snapshotUrl, contourVertices, onContourChange, onSegment, onConfirmContour, onFinish, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   regStep: RegisterStep;
   progress: number;
   countdown: number;
   error: string;
-  onStart: () => void;
+  snapshotUrl: string;
+  contourVertices: Vertex[];
+  onContourChange: (v: Vertex[]) => void;
+  onSegment: () => void;
+  onConfirmContour: () => void;
   onFinish: () => void;
   onBack: () => void;
 }) {
+  const showVideo = regStep !== 'contour';
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <button onClick={onBack} className="text-slate-400 hover:text-white p-1">
-          <BackIcon />
-        </button>
+        <button onClick={onBack} className="text-slate-400 hover:text-white p-1"><BackIcon /></button>
         <h2 className="text-xl font-bold">良品を登録する</h2>
       </div>
 
+      {/* Camera / snapshot area */}
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
-        <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
+        <video ref={videoRef} playsInline muted
+          className={`w-full h-full object-cover ${showVideo ? '' : 'hidden'}`} />
+
+        {/* Contour editor (snapshot + polygon) */}
+        {regStep === 'contour' && snapshotUrl && (
+          <ContourEditorOverlay
+            snapshotUrl={snapshotUrl}
+            vertices={contourVertices}
+            onVerticesChange={onContourChange}
+            onConfirm={onConfirmContour}
+            onRetry={onSegment}
+          />
+        )}
+
+        {regStep === 'segmenting' && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 gap-3">
+            <Spinner size="lg" />
+            <p className="font-semibold text-sm">輪郭を検出中…</p>
+          </div>
+        )}
 
         {regStep === 'countdown' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
@@ -368,11 +408,9 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart
         )}
 
         {regStep === 'fitting' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/70">
-            <div className="text-center">
-              <Spinner size="lg" />
-              <p className="mt-3 font-semibold">AIが学習中…</p>
-            </div>
+          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 gap-3">
+            <Spinner size="lg" />
+            <p className="font-semibold">AIが学習中…</p>
           </div>
         )}
 
@@ -386,6 +424,7 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart
         )}
       </div>
 
+      {/* Progress bar */}
       {(regStep === 'capturing' || regStep === 'fitting') && (
         <div>
           <div className="flex justify-between text-sm text-slate-400 mb-1">
@@ -393,35 +432,144 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart
             <span>{progress} / {CAPTURE_COUNT}</span>
           </div>
           <div className="w-full bg-slate-700 rounded-full h-2">
-            <div
-              className="bg-blue-500 h-2 rounded-full transition-all duration-200"
-              style={{ width: `${(progress / CAPTURE_COUNT) * 100}%` }}
-            />
+            <div className="bg-blue-500 h-2 rounded-full transition-all duration-200"
+              style={{ width: `${(progress / CAPTURE_COUNT) * 100}%` }} />
           </div>
         </div>
       )}
 
+      {/* Idle: prompt + segment button */}
       {regStep === 'idle' && (
         <div className="space-y-3">
-          <p className="text-slate-300 text-sm text-center">良品をカメラに向けてください。ボタンを押すと3秒後に自動撮影が始まります。</p>
-          {error ? (
+          <p className="text-slate-300 text-sm text-center">
+            ワークをカメラに向けて「輪郭を検出」を押してください
+          </p>
+          {error && (
             <div className="bg-red-900/50 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
               ⚠ {error}
             </div>
-          ) : null}
-          <button onClick={onStart}
+          )}
+          <button onClick={onSegment}
             className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-2xl font-semibold text-lg transition-colors">
-            {error ? '再試行' : '撮影開始'}
+            輪郭を検出する
           </button>
         </div>
       )}
 
+      {/* Done: finish button */}
       {regStep === 'done' && (
         <button onClick={onFinish}
           className="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-2xl font-semibold text-lg transition-colors">
           ホームへ戻る
         </button>
       )}
+    </div>
+  );
+}
+
+function ContourEditorOverlay({ snapshotUrl, vertices, onVerticesChange, onConfirm, onRetry }: {
+  snapshotUrl: string;
+  vertices: Vertex[];
+  onVerticesChange: (v: Vertex[]) => void;
+  onConfirm: () => void;
+  onRetry: () => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragRef = useRef<number | null>(null);
+  const HIT = 0.07;
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || vertices.length < 2) return;
+    const ctx = canvas.getContext('2d')!;
+    const cw = canvas.width, ch = canvas.height;
+    ctx.clearRect(0, 0, cw, ch);
+
+    // Semi-dark overlay outside polygon
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.beginPath();
+    ctx.moveTo(vertices[0].x * cw, vertices[0].y * ch);
+    for (let i = 1; i < vertices.length; i++) ctx.lineTo(vertices[i].x * cw, vertices[i].y * ch);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalCompositeOperation = 'source-over';
+
+    // Polygon border
+    ctx.beginPath();
+    ctx.moveTo(vertices[0].x * cw, vertices[0].y * ch);
+    for (let i = 1; i < vertices.length; i++) ctx.lineTo(vertices[i].x * cw, vertices[i].y * ch);
+    ctx.closePath();
+    ctx.strokeStyle = '#34D399';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    // Vertex handles
+    vertices.forEach(v => {
+      ctx.beginPath();
+      ctx.arc(v.x * cw, v.y * ch, 13, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(52,211,153,0.9)';
+      ctx.fill();
+      ctx.strokeStyle = '#065F46';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    });
+  }, [vertices]);
+
+  const pos = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const t = e.touches[0];
+    return { x: (t.clientX - r.left) / r.width, y: (t.clientY - r.top) / r.height };
+  };
+
+  const onTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    const p = pos(e);
+    let best = -1, bestD = HIT;
+    vertices.forEach((v, i) => {
+      const d = Math.hypot(v.x - p.x, v.y - p.y);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    dragRef.current = best;
+  };
+
+  const onTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
+    e.preventDefault();
+    if (dragRef.current === null || dragRef.current < 0) return;
+    const p = pos(e);
+    const nx = Math.max(0, Math.min(1, p.x));
+    const ny = Math.max(0, Math.min(1, p.y));
+    onVerticesChange(vertices.map((v, i) => i === dragRef.current ? { x: nx, y: ny } : v));
+  };
+
+  const onTouchEnd = () => { dragRef.current = null; };
+
+  return (
+    <div className="absolute inset-0">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src={snapshotUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
+      <canvas
+        ref={canvasRef}
+        width={640} height={360}
+        className="absolute inset-0 w-full h-full touch-none"
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
+      />
+      <div className="absolute bottom-3 left-3 right-3 flex gap-2">
+        <button onClick={onRetry}
+          className="flex-1 bg-slate-700/90 text-white py-2.5 rounded-xl text-sm font-semibold">
+          再検出
+        </button>
+        <button onClick={onConfirm} disabled={vertices.length < 3}
+          className="flex-1 bg-emerald-600/90 text-white py-2.5 rounded-xl text-sm font-semibold disabled:opacity-50">
+          この輪郭で登録 →
+        </button>
+      </div>
+      <p className="absolute top-3 left-0 right-0 text-center text-xs text-white/80 drop-shadow">
+        頂点をドラッグして輪郭を調整してください
+      </p>
     </div>
   );
 }
@@ -441,9 +589,7 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <button onClick={onBack} className="text-slate-400 hover:text-white p-1">
-          <BackIcon />
-        </button>
+        <button onClick={onBack} className="text-slate-400 hover:text-white p-1"><BackIcon /></button>
         <h2 className="text-xl font-bold">リアルタイム検査</h2>
         {result && (
           <span className={`ml-auto px-3 py-1 rounded-full text-sm font-bold ${isNG ? 'bg-red-600' : 'bg-emerald-600'}`}>
@@ -455,11 +601,7 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
         <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-cover" />
         <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
-        {!result && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <Spinner size="sm" />
-          </div>
-        )}
+        {!result && <div className="absolute inset-0 flex items-center justify-center"><Spinner size="sm" /></div>}
       </div>
 
       {result && (
@@ -471,10 +613,8 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
             </span>
           </div>
           <div className="w-full bg-slate-700 rounded-full h-3">
-            <div
-              className={`h-3 rounded-full transition-all duration-150 ${isNG ? 'bg-red-500' : score > 0.7 ? 'bg-yellow-500' : 'bg-emerald-500'}`}
-              style={{ width: `${Math.min(score * 100, 100)}%` }}
-            />
+            <div className={`h-3 rounded-full transition-all duration-150 ${isNG ? 'bg-red-500' : score > 0.7 ? 'bg-yellow-500' : 'bg-emerald-500'}`}
+              style={{ width: `${Math.min(score * 100, 100)}%` }} />
           </div>
           <div className="flex justify-end mt-0.5">
             <span className="text-xs text-slate-500">閾値: 100%</span>
@@ -490,12 +630,9 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
             {' '}({sensitivity.toFixed(1)}x)
           </span>
         </div>
-        <input
-          type="range" min={0.5} max={2.0} step={0.1}
-          value={sensitivity}
-          onChange={e => onSensitivityChange(Number(e.target.value))}
-          className="w-full accent-blue-500"
-        />
+        <input type="range" min={0.5} max={2.0} step={0.1}
+          value={sensitivity} onChange={e => onSensitivityChange(Number(e.target.value))}
+          className="w-full accent-blue-500" />
         <div className="flex justify-between text-xs text-slate-500">
           <span>敏感</span><span>鈍感</span>
         </div>
@@ -524,9 +661,7 @@ function NgDetailScreen({ frameB64, result, explanation, explaining, onBack, onH
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
-        <button onClick={onBack} className="text-slate-400 hover:text-white p-1">
-          <BackIcon />
-        </button>
+        <button onClick={onBack} className="text-slate-400 hover:text-white p-1"><BackIcon /></button>
         <h2 className="text-xl font-bold">欠陥詳細</h2>
         <span className="ml-auto px-3 py-1 rounded-full text-sm font-bold bg-red-600">NG</span>
       </div>
@@ -595,9 +730,7 @@ function blobToB64(blob: Blob): Promise<string> {
   });
 }
 
-function sleep(ms: number) {
-  return new Promise(r => setTimeout(r, ms));
-}
+function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 // =================================================================== icons ==
 

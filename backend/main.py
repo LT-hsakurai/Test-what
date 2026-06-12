@@ -1,10 +1,11 @@
 import os
+import json
 import anthropic
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from inspector import PatchCoreInspector
+from inspector import PatchCoreInspector, auto_segment
 
 app = FastAPI(title="外観検査 API")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -17,12 +18,26 @@ def health():
     return {"status": "ok", "fitted": inspector.is_fitted, "threshold": inspector.threshold}
 
 
+@app.post("/segment")
+async def segment(file: UploadFile = File(...)):
+    data = await file.read()
+    try:
+        vertices = auto_segment(data)
+        return {"vertices": vertices}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 @app.post("/register")
-async def register(files: list[UploadFile] = File(...)):
+async def register(
+    files: list[UploadFile] = File(...),
+    contour: str = Form(""),
+):
     if len(files) < 5:
         raise HTTPException(400, "最低5枚の良品画像が必要です")
     images = [await f.read() for f in files]
-    return inspector.fit(images)
+    vertices = json.loads(contour) if contour.strip() else None
+    return inspector.fit(images, vertices)
 
 
 @app.post("/inspect")
