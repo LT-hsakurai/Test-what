@@ -31,6 +31,7 @@ export default function Page() {
   // inspect state
   const [latestResult, setLatestResult] = useState<InspectResult | null>(null);
   const [lastFrameB64, setLastFrameB64] = useState('');
+  const [sensitivity, setSensitivity] = useState(1.0);
   const inspectingRef = useRef(false);
 
   // ng-detail state
@@ -159,7 +160,12 @@ export default function Page() {
           fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd })
             .then(r => r.json())
             .then((data: InspectResult) => {
-              setLatestResult(data);
+              // sensitivity slider overrides backend judgment
+              const adjusted: InspectResult = {
+                ...data,
+                judgment: data.normalized_score > sensitivity ? 'NG' : 'OK',
+              };
+              setLatestResult(adjusted);
               drawHeatmap(overlayRef.current, data.heatmap);
             })
             .catch(() => {});
@@ -186,7 +192,7 @@ export default function Page() {
     setExplaining(true);
     setExplanation('');
 
-    const res = await fetch(`${BACKEND}/explain`, {
+    const res = await fetch('/api/explain', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -238,6 +244,8 @@ export default function Page() {
             videoRef={videoRef}
             overlayRef={overlayRef}
             result={latestResult}
+            sensitivity={sensitivity}
+            onSensitivityChange={setSensitivity}
             onAskClaude={askClaude}
             onBack={leaveInspect}
           />
@@ -379,10 +387,12 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, onStart, onFin
   );
 }
 
-function InspectScreen({ videoRef, overlayRef, result, onAskClaude, onBack }: {
+function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, onAskClaude, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   overlayRef: React.RefObject<HTMLCanvasElement | null>;
   result: InspectResult | null;
+  sensitivity: number;
+  onSensitivityChange: (v: number) => void;
   onAskClaude: () => void;
   onBack: () => void;
 }) {
@@ -434,6 +444,26 @@ function InspectScreen({ videoRef, overlayRef, result, onAskClaude, onBack }: {
           </div>
         </div>
       )}
+
+      {/* Sensitivity slider */}
+      <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
+        <div className="flex justify-between text-xs text-slate-400">
+          <span>検出感度</span>
+          <span className="font-medium text-white">
+            {sensitivity <= 0.7 ? '高（敏感）' : sensitivity >= 1.5 ? '低（鈍感）' : '標準'}
+            {' '}({sensitivity.toFixed(1)}x)
+          </span>
+        </div>
+        <input
+          type="range" min={0.5} max={2.0} step={0.1}
+          value={sensitivity}
+          onChange={e => onSensitivityChange(Number(e.target.value))}
+          className="w-full accent-blue-500"
+        />
+        <div className="flex justify-between text-xs text-slate-500">
+          <span>敏感</span><span>鈍感</span>
+        </div>
+      </div>
 
       {/* NG button */}
       {isNG && (
