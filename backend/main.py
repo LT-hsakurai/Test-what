@@ -32,11 +32,14 @@ async def register(
 
 
 @app.post("/inspect")
-async def inspect(file: UploadFile = File(...)):
+async def inspect(
+    file: UploadFile = File(...),
+    match_tolerance: float = Form(0.35),
+):
     if not inspector.is_fitted:
         raise HTTPException(400, "良品が未登録です")
     data = await file.read()
-    return inspector.predict(data)
+    return inspector.predict(data, match_threshold=match_tolerance)
 
 
 class ExplainRequest(BaseModel):

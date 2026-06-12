@@ -122,14 +122,14 @@ class PatchCoreInspector:
 
     # --------------------------------------------------------------- predict --
 
-    def predict(self, img_bytes: bytes) -> dict:
+    def predict(self, img_bytes: bytes, match_threshold: float = MATCH_THRESHOLD) -> dict:
         if not self.is_fitted:
             raise RuntimeError("良品が未登録です")
 
         full = self._decode(img_bytes)
         fh, fw = full.shape[:2]
 
-        crop, match_roi, confidence = self._match_and_crop(full)
+        crop, match_roi, confidence = self._match_and_crop(full, match_threshold)
 
         tensor = self._crop_to_tensor(crop)
         feats = self._extract(tensor)
@@ -161,7 +161,7 @@ class PatchCoreInspector:
     # -------------------------------------------------------- matching/crop --
 
     def _match_and_crop(
-        self, full: np.ndarray
+        self, full: np.ndarray, match_threshold: float = MATCH_THRESHOLD
     ) -> tuple[np.ndarray, tuple[int, int, int, int], float]:
         """Return (crop_bgr, (x,y,w,h)_px, confidence)."""
         fallback = self._crop_by_roi(full, self.registered_roi)
@@ -187,7 +187,7 @@ class PatchCoreInspector:
         result = cv2.matchTemplate(gray_full, gray_tmpl, cv2.TM_CCOEFF_NORMED)
         _, confidence, _, max_loc = cv2.minMaxLoc(result)
 
-        if confidence < MATCH_THRESHOLD:
+        if confidence < match_threshold:
             return fallback, fallback_roi, float(confidence)
 
         x, y = max_loc

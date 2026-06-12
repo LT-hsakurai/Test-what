@@ -38,6 +38,7 @@ export default function Page() {
   const [latestResult, setLatestResult] = useState<InspectResult | null>(null);
   const [lastFrameB64, setLastFrameB64] = useState('');
   const [sensitivity, setSensitivity] = useState(1.0);
+  const [matchTolerance, setMatchTolerance] = useState(0.35);
   const inspectingRef = useRef(false);
 
   // ng-detail state
@@ -184,6 +185,7 @@ export default function Page() {
 
           const fd = new FormData();
           fd.append('file', blob, 'frame.jpg');
+          fd.append('match_tolerance', String(matchTolerance));
           fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd })
             .then(r => r.json())
             .then((data: InspectResult) => {
@@ -275,6 +277,8 @@ export default function Page() {
             result={latestResult}
             sensitivity={sensitivity}
             onSensitivityChange={setSensitivity}
+            matchTolerance={matchTolerance}
+            onMatchToleranceChange={setMatchTolerance}
             onAskClaude={askClaude}
             onBack={leaveInspect}
           />
@@ -433,12 +437,14 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, roi, onRoiChan
   );
 }
 
-function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, onAskClaude, onBack }: {
+function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivityChange, matchTolerance, onMatchToleranceChange, onAskClaude, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   overlayRef: React.RefObject<HTMLCanvasElement | null>;
   result: InspectResult | null;
   sensitivity: number;
   onSensitivityChange: (v: number) => void;
+  matchTolerance: number;
+  onMatchToleranceChange: (v: number) => void;
   onAskClaude: () => void;
   onBack: () => void;
 }) {
@@ -490,6 +496,23 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
           </div>
         </div>
       )}
+
+      {/* Match tolerance slider */}
+      <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
+        <div className="flex justify-between text-xs text-slate-400">
+          <span>マッチング許容度</span>
+          <span className="font-medium text-white">{matchTolerance.toFixed(2)}</span>
+        </div>
+        <input
+          type="range" min={0.1} max={0.9} step={0.05}
+          value={matchTolerance}
+          onChange={e => onMatchToleranceChange(Number(e.target.value))}
+          className="w-full accent-emerald-500"
+        />
+        <div className="flex justify-between text-xs text-slate-500">
+          <span>緩い（ズレ許容）</span><span>厳しい（完全一致）</span>
+        </div>
+      </div>
 
       {/* Sensitivity slider */}
       <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
