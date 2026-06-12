@@ -1,27 +1,33 @@
 {
   "name": "test-what",
   "version": "1.0.0",
-  "main": "index.ts",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:44613/git/LT-hsakurai/Test-what"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
-    "@expo/vector-icons": "^15.1.1",
-    "expo": "~56.0.11",
-    "expo-camera": "^56.0.8",
-    "expo-file-system": "^56.0.8",
-    "expo-image-picker": "^56.0.17",
-    "expo-status-bar": "~56.0.4",
-    "react": "19.2.3",
-    "react-native": "0.85.3"
+    "next": "^16.2.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@types/react": "~19.2.2",
-    "typescript": "~6.0.3"
-  },
-  "scripts": {
-    "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
-    "web": "expo start --web"
-  },
-  "private": true
+    "@tailwindcss/postcss": "^4.3.0",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "postcss": "^8.5.15",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^6.0.3"
+  }
 }
