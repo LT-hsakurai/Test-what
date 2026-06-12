@@ -4,9 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 
 // ------------------------------------------------------------------ types --
 type Mode = 'home' | 'registering' | 'inspecting' | 'ng-detail';
-type RegisterStep = 'idle' | 'segmenting' | 'contour' | 'countdown' | 'capturing' | 'fitting' | 'done';
-
-interface Vertex { x: number; y: number }
+type RegisterStep = 'idle' | 'countdown' | 'capturing' | 'fitting' | 'done';
 
 interface InspectResult {
   score: number;
@@ -29,8 +27,6 @@ export default function Page() {
   const [regProgress, setRegProgress] = useState(0);
   const [countdown, setCountdown] = useState(3);
   const [regError, setRegError] = useState('');
-  const [snapshotUrl, setSnapshotUrl] = useState('');
-  const [contourVertices, setContourVertices] = useState<Vertex[]>([]);
 
   // inspect state
   const [latestResult, setLatestResult] = useState<InspectResult | null>(null);
@@ -95,38 +91,8 @@ export default function Page() {
     setRegStep('idle');
     setRegProgress(0);
     setRegError('');
-    setSnapshotUrl('');
-    setContourVertices([]);
     await startCamera();
   }, [startCamera]);
-
-  const doSegment = useCallback(async () => {
-    const blob = await captureBlob();
-    if (!blob) return;
-    const url = URL.createObjectURL(blob);
-    setSnapshotUrl(url);
-    setRegStep('segmenting');
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
-    try {
-      const fd = new FormData();
-      fd.append('file', blob, 'snapshot.jpg');
-      const res = await fetch(`${BACKEND}/segment`, { method: 'POST', body: fd, signal: controller.signal });
-      if (!res.ok) throw new Error();
-      const data = await res.json();
-      setContourVertices(data.vertices);
-    } catch {
-      // Fallback to center bounding box
-      setContourVertices([
-        { x: 0.15, y: 0.15 }, { x: 0.85, y: 0.15 },
-        { x: 0.85, y: 0.85 }, { x: 0.15, y: 0.85 },
-      ]);
-    } finally {
-      clearTimeout(timer);
-      setRegStep('contour');
-    }
-  }, [captureBlob]);
 
   const startCapture = useCallback(async () => {
     setRegStep('countdown');
@@ -151,9 +117,6 @@ export default function Page() {
     try {
       const fd = new FormData();
       frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
-      if (contourVertices.length >= 3) {
-        fd.append('contour', JSON.stringify(contourVertices));
-      }
       const res = await fetch(`${BACKEND}/register`, { method: 'POST', body: fd, signal: controller.signal });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -171,7 +134,7 @@ export default function Page() {
     } finally {
       clearTimeout(timer);
     }
-  }, [captureBlob, contourVertices, stopCamera]);
+  }, [captureBlob, stopCamera]);
 
   const finishRegister = useCallback(() => {
     setMode('home');
@@ -285,11 +248,7 @@ export default function Page() {
             progress={regProgress}
             countdown={countdown}
             error={regError}
-            snapshotUrl={snapshotUrl}
-            contourVertices={contourVertices}
-            onContourChange={setContourVertices}
-            onSegment={doSegment}
-            onConfirmContour={startCapture}
+            onStart={startCapture}
             onFinish={finishRegister}
             onBack={() => { stopCamera(); setMode('home'); }}
           />
@@ -355,22 +314,16 @@ function HomeScreen({ isFitted, onRegister, onInspect }: {
   );
 }
 
-function RegisterScreen({ videoRef, regStep, progress, countdown, error, snapshotUrl, contourVertices, onContourChange, onSegment, onConfirmContour, onFinish, onBack }: {
+function RegisterScreen({ videoRef, regStep, progress, countdown, error, onStart, onFinish, onBack }: {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   regStep: RegisterStep;
   progress: number;
   countdown: number;
   error: string;
-  snapshotUrl: string;
-  contourVertices: Vertex[];
-  onContourChange: (v: Vertex[]) => void;
-  onSegment: () => void;
-  onConfirmContour: () => void;
+  onStart: () => void;
   onFinish: () => void;
   onBack: () => void;
 }) {
-  const showVideo = regStep !== 'contour';
-
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-3">
@@ -378,28 +331,8 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, snapsho
         <h2 className="text-xl font-bold">良品を登録する</h2>
       </div>
 
-      {/* Camera / snapshot area */}
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
-        <video ref={videoRef} playsInline muted
-          className={`w-full h-full object-cover ${showVideo ? '' : 'hidden'}`} />
-
-        {/* Contour editor (snapshot + polygon) */}
-        {regStep === 'contour' && snapshotUrl && (
-          <ContourEditorOverlay
-            snapshotUrl={snapshotUrl}
-            vertices={contourVertices}
-            onVerticesChange={onContourChange}
-            onConfirm={onConfirmContour}
-            onRetry={onSegment}
-          />
-        )}
-
-        {regStep === 'segmenting' && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/60 gap-3">
-            <Spinner size="lg" />
-            <p className="font-semibold text-sm">輪郭を検出中…</p>
-          </div>
-        )}
+        <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
 
         {regStep === 'countdown' && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/50">
@@ -424,7 +357,6 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, snapsho
         )}
       </div>
 
-      {/* Progress bar */}
       {(regStep === 'capturing' || regStep === 'fitting') && (
         <div>
           <div className="flex justify-between text-sm text-slate-400 mb-1">
@@ -438,138 +370,29 @@ function RegisterScreen({ videoRef, regStep, progress, countdown, error, snapsho
         </div>
       )}
 
-      {/* Idle: prompt + segment button */}
       {regStep === 'idle' && (
         <div className="space-y-3">
           <p className="text-slate-300 text-sm text-center">
-            ワークをカメラに向けて「輪郭を検出」を押してください
+            良品をカメラに向けてください。ボタンを押すと3秒後に自動撮影が始まります。
           </p>
           {error && (
             <div className="bg-red-900/50 border border-red-700 rounded-xl px-4 py-3 text-red-300 text-sm">
               ⚠ {error}
             </div>
           )}
-          <button onClick={onSegment}
+          <button onClick={onStart}
             className="w-full bg-blue-600 hover:bg-blue-500 py-4 rounded-2xl font-semibold text-lg transition-colors">
-            輪郭を検出する
+            {error ? '再試行' : '撮影開始'}
           </button>
         </div>
       )}
 
-      {/* Done: finish button */}
       {regStep === 'done' && (
         <button onClick={onFinish}
           className="w-full bg-emerald-600 hover:bg-emerald-500 py-4 rounded-2xl font-semibold text-lg transition-colors">
           ホームへ戻る
         </button>
       )}
-    </div>
-  );
-}
-
-function ContourEditorOverlay({ snapshotUrl, vertices, onVerticesChange, onConfirm, onRetry }: {
-  snapshotUrl: string;
-  vertices: Vertex[];
-  onVerticesChange: (v: Vertex[]) => void;
-  onConfirm: () => void;
-  onRetry: () => void;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragRef = useRef<number | null>(null);
-  const HIT = 0.07;
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || vertices.length < 2) return;
-    const ctx = canvas.getContext('2d')!;
-    const cw = canvas.width, ch = canvas.height;
-    ctx.clearRect(0, 0, cw, ch);
-
-    // Semi-dark overlay outside polygon
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(0, 0, cw, ch);
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.beginPath();
-    ctx.moveTo(vertices[0].x * cw, vertices[0].y * ch);
-    for (let i = 1; i < vertices.length; i++) ctx.lineTo(vertices[i].x * cw, vertices[i].y * ch);
-    ctx.closePath();
-    ctx.fill();
-    ctx.globalCompositeOperation = 'source-over';
-
-    // Polygon border
-    ctx.beginPath();
-    ctx.moveTo(vertices[0].x * cw, vertices[0].y * ch);
-    for (let i = 1; i < vertices.length; i++) ctx.lineTo(vertices[i].x * cw, vertices[i].y * ch);
-    ctx.closePath();
-    ctx.strokeStyle = '#34D399';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
-
-    // Vertex handles
-    vertices.forEach(v => {
-      ctx.beginPath();
-      ctx.arc(v.x * cw, v.y * ch, 13, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(52,211,153,0.9)';
-      ctx.fill();
-      ctx.strokeStyle = '#065F46';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    });
-  }, [vertices]);
-
-  const pos = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    const r = e.currentTarget.getBoundingClientRect();
-    const t = e.touches[0];
-    return { x: (t.clientX - r.left) / r.width, y: (t.clientY - r.top) / r.height };
-  };
-
-  const onTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    const p = pos(e);
-    let best = -1, bestD = HIT;
-    vertices.forEach((v, i) => {
-      const d = Math.hypot(v.x - p.x, v.y - p.y);
-      if (d < bestD) { bestD = d; best = i; }
-    });
-    dragRef.current = best;
-  };
-
-  const onTouchMove = (e: React.TouchEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
-    if (dragRef.current === null || dragRef.current < 0) return;
-    const p = pos(e);
-    const nx = Math.max(0, Math.min(1, p.x));
-    const ny = Math.max(0, Math.min(1, p.y));
-    onVerticesChange(vertices.map((v, i) => i === dragRef.current ? { x: nx, y: ny } : v));
-  };
-
-  const onTouchEnd = () => { dragRef.current = null; };
-
-  return (
-    <div className="absolute inset-0">
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={snapshotUrl} alt="" className="absolute inset-0 w-full h-full object-cover" />
-      <canvas
-        ref={canvasRef}
-        width={640} height={360}
-        className="absolute inset-0 w-full h-full touch-none"
-        onTouchStart={onTouchStart}
-        onTouchMove={onTouchMove}
-        onTouchEnd={onTouchEnd}
-      />
-      <div className="absolute bottom-3 left-3 right-3 flex gap-2">
-        <button onClick={onRetry}
-          className="flex-1 bg-slate-700/90 text-white py-2.5 rounded-xl text-sm font-semibold">
-          再検出
-        </button>
-        <button onClick={onConfirm} disabled={vertices.length < 3}
-          className="flex-1 bg-emerald-600/90 text-white py-2.5 rounded-xl text-sm font-semibold disabled:opacity-50">
-          この輪郭で登録 →
-        </button>
-      </div>
-      <p className="absolute top-3 left-0 right-0 text-center text-xs text-white/80 drop-shadow">
-        頂点をドラッグして輪郭を調整してください
-      </p>
     </div>
   );
 }
