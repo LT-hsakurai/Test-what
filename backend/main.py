@@ -1,6 +1,6 @@
 import os
 import anthropic
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -18,11 +18,17 @@ def health():
 
 
 @app.post("/register")
-async def register(files: list[UploadFile] = File(...)):
+async def register(
+    files: list[UploadFile] = File(...),
+    roi_x: float = Form(0.0),
+    roi_y: float = Form(0.0),
+    roi_w: float = Form(1.0),
+    roi_h: float = Form(1.0),
+):
     if len(files) < 5:
         raise HTTPException(400, "最低5枚の良品画像が必要です")
     images = [await f.read() for f in files]
-    return inspector.fit(images)
+    return inspector.fit(images, (roi_x, roi_y, roi_w, roi_h))
 
 
 @app.post("/inspect")

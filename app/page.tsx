@@ -14,7 +14,9 @@ interface InspectResult {
   threshold: number;
   normalized_score: number;
   judgment: 'OK' | 'NG';
-  heatmap: string; // base64 PNG
+  heatmap: string;
+  match_confidence: number;
+  match_roi: { x: number; y: number; w: number; h: number };
 }
 
 const BACKEND = process.env.NEXT_PUBLIC_BACKEND_URL ?? 'http://localhost:8000';
@@ -132,20 +134,24 @@ export default function Page() {
       await sleep(1000);
     }
 
-    // auto-capture CAPTURE_COUNT frames
+    // auto-capture CAPTURE_COUNT frames (full frame — backend handles crop/match)
     setRegStep('capturing');
     const frames: Blob[] = [];
     for (let i = 0; i < CAPTURE_COUNT; i++) {
-      const blob = await captureBlob(roi);
+      const blob = await captureBlob(); // full frame
       if (blob) frames.push(blob);
       setRegProgress(i + 1);
       await sleep(200);
     }
 
-    // send to backend
+    // send full frames + ROI params to backend
     setRegStep('fitting');
     const fd = new FormData();
     frames.forEach((f, i) => fd.append('files', f, `frame_${i}.jpg`));
+    fd.append('roi_x', String(roi.x));
+    fd.append('roi_y', String(roi.y));
+    fd.append('roi_w', String(roi.w));
+    fd.append('roi_h', String(roi.h));
     await fetch(`${BACKEND}/register`, { method: 'POST', body: fd });
 
     stopCamera();
@@ -171,7 +177,7 @@ export default function Page() {
 
     async function loop() {
       while (inspectingRef.current) {
-        const blob = await captureBlob(roi);
+        const blob = await captureBlob(); // full frame — backend auto-matches
         if (blob) {
           const b64 = await blobToB64(blob);
           setLastFrameB64(b64);
@@ -181,13 +187,12 @@ export default function Page() {
           fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd })
             .then(r => r.json())
             .then((data: InspectResult) => {
-              // sensitivity slider overrides backend judgment
               const adjusted: InspectResult = {
                 ...data,
                 judgment: data.normalized_score > sensitivity ? 'NG' : 'OK',
               };
               setLatestResult(adjusted);
-              drawHeatmap(overlayRef.current, data.heatmap);
+              drawHeatmap(overlayRef.current, data.heatmap, data.match_roi);
             })
             .catch(() => {});
         }
@@ -514,6 +519,15 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
         </button>
       )}
 
+      {/* Match confidence */}
+      {result && (
+        <div className="flex items-center justify-between text-xs px-1">
+          <span className="text-slate-500">製品マッチング</span>
+          <span className={`font-medium ${result.match_confidence >= 0.35 ? 'text-emerald-400' : 'text-yellow-400'}`}>
+            {result.match_confidence >= 0.35 ? '✓ 自動位置合わせ' : '⚠ ROI固定'} ({(result.match_confidence * 100).toFixed(0)}%)
+          </span>
+        </div>
+      )}
       <p className="text-slate-500 text-xs text-center">赤いヒートマップが異常箇所を示します</p>
     </div>
   );
@@ -578,17 +592,25 @@ function NgDetailScreen({ frameB64, result, explanation, explaining, onBack, onH
 
 // ================================================================= helpers ==
 
-function drawHeatmap(canvas: HTMLCanvasElement | null, b64: string) {
+function drawHeatmap(
+  canvas: HTMLCanvasElement | null,
+  b64: string,
+  roi?: { x: number; y: number; w: number; h: number },
+) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const img = new Image();
   img.onload = () => {
-    canvas.width = img.width;
-    canvas.height = img.height;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const cw = canvas.width || 640;
+    const ch = canvas.height || 480;
+    ctx.clearRect(0, 0, cw, ch);
     ctx.globalAlpha = 0.65;
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    if (roi) {
+      ctx.drawImage(img, roi.x * cw, roi.y * ch, roi.w * cw, roi.h * ch);
+    } else {
+      ctx.drawImage(img, 0, 0, cw, ch);
+    }
   };
   img.src = `data:image/png;base64,${b64}`;
 }
