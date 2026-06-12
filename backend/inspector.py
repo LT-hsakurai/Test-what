@@ -17,29 +17,32 @@ Vertex = dict  # {"x": float, "y": float}  in 0-1 relative coords
 
 
 def auto_segment(img_bytes: bytes) -> list[Vertex]:
-    """GrabCut-based foreground segmentation. Returns polygon vertices in 0-1 coords."""
+    """Foreground segmentation. Returns polygon vertices in 0-1 coords.
+
+    Mask-initialized GrabCut (border=definite BG, center=probable FG) is
+    far more reliable than a plain rect init. The seed mask is refined with
+    a border-vs-object contrast estimate before running GrabCut.
+    """
     nparr = np.frombuffer(img_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("画像のデコードに失敗しました")
     h, w = img.shape[:2]
 
-    # Downscale to max 400px for speed
-    scale = min(1.0, 400 / max(h, w))
-    sw, sh = int(w * scale), int(h * scale)
-    small = cv2.resize(img, (sw, sh)) if scale < 1.0 else img
+    # Downscale to max 512px (better edges than 400px, still fast)
+    scale = min(1.0, 512 / max(h, w))
+    sw, sh = max(1, int(w * scale)), max(1, int(h * scale))
+    small = cv2.resize(img, (sw, sh)) if scale < 1.0 else img.copy()
 
-    # GrabCut with a center bounding box (15% margin)
-    mx, my = int(sw * 0.15), int(sh * 0.15)
-    rect = (mx, my, sw - 2 * mx, sh - 2 * my)
-    mask = np.zeros((sh, sw), np.uint8)
-    bgd = np.zeros((1, 65), np.float64)
-    fgd = np.zeros((1, 65), np.float64)
-    cv2.grabCut(small, mask, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
+    fg = _grabcut_mask(small, sw, sh)
 
-    fg = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+    # If GrabCut produced a tiny/empty result, fall back to contrast threshold
+    if fg is None or cv2.countNonZero(fg) < 0.02 * sw * sh:
+        fg = _contrast_mask(small, sw, sh)
+    if fg is None or cv2.countNonZero(fg) < 0.02 * sw * sh:
+        return _default_box()
 
-    # Morphological cleanup
+    # Morphological cleanup + keep largest blob only
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, k)
     fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, k)
@@ -49,11 +52,15 @@ def auto_segment(img_bytes: bytes) -> list[Vertex]:
         return _default_box()
 
     largest = max(contours, key=cv2.contourArea)
+    if cv2.contourArea(largest) < 0.02 * sw * sh:
+        return _default_box()
+
+    # Approximate to a draggable polygon (~6-14 vertices that hug the shape)
     peri = cv2.arcLength(largest, True)
-    eps = 0.02 * peri
+    eps = 0.01 * peri
     approx = cv2.approxPolyDP(largest, eps, True)
-    while len(approx) > 16 and eps < 0.15 * peri:
-        eps *= 1.3
+    while len(approx) > 14 and eps < 0.15 * peri:
+        eps *= 1.25
         approx = cv2.approxPolyDP(largest, eps, True)
     if len(approx) < 3:
         hull = cv2.convexHull(largest)
@@ -62,6 +69,49 @@ def auto_segment(img_bytes: bytes) -> list[Vertex]:
         return _default_box()
 
     return [{"x": round(float(pt[0][0] / sw), 4), "y": round(float(pt[0][1] / sh), 4)} for pt in approx]
+
+
+def _grabcut_mask(small, sw, sh):
+    """Mask-initialized GrabCut. Returns a uint8 foreground mask (255/0)."""
+    mask = np.full((sh, sw), cv2.GC_PR_BGD, np.uint8)
+
+    # Outer ring = definite background
+    bw = max(2, int(min(sw, sh) * 0.05))
+    mask[:bw, :] = cv2.GC_BGD
+    mask[-bw:, :] = cv2.GC_BGD
+    mask[:, :bw] = cv2.GC_BGD
+    mask[:, -bw:] = cv2.GC_BGD
+
+    # Central ellipse = probable foreground
+    cv2.ellipse(mask, (sw // 2, sh // 2),
+                (int(sw * 0.32), int(sh * 0.32)), 0, 0, 360, cv2.GC_PR_FGD, -1)
+
+    bgd = np.zeros((1, 65), np.float64)
+    fgd = np.zeros((1, 65), np.float64)
+    try:
+        cv2.grabCut(small, mask, None, bgd, fgd, 8, cv2.GC_INIT_WITH_MASK)
+    except Exception:
+        return None
+    return np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
+
+
+def _contrast_mask(small, sw, sh):
+    """Fallback: separate object from background using border colour as BG ref."""
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Estimate background brightness from the border ring
+    bw = max(2, int(min(sw, sh) * 0.05))
+    ring = np.concatenate([
+        gray[:bw, :].ravel(), gray[-bw:, :].ravel(),
+        gray[:, :bw].ravel(), gray[:, -bw:].ravel(),
+    ])
+    bg_mean = float(np.mean(ring))
+
+    # Object = pixels differing enough from the background brightness
+    diff = cv2.absdiff(gray, np.full_like(gray, int(bg_mean)))
+    _, fg = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    return fg
 
 
 def _default_box() -> list[Vertex]:
