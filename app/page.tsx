@@ -192,7 +192,7 @@ export default function Page() {
                 judgment: data.normalized_score > sensitivity ? 'NG' : 'OK',
               };
               setLatestResult(adjusted);
-              drawHeatmap(overlayRef.current, data.heatmap, data.match_roi);
+              drawHeatmap(overlayRef.current, data.heatmap, data.match_roi, data.match_confidence);
             })
             .catch(() => {});
         }
@@ -596,6 +596,7 @@ function drawHeatmap(
   canvas: HTMLCanvasElement | null,
   b64: string,
   roi?: { x: number; y: number; w: number; h: number },
+  matchConfidence?: number,
 ) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
@@ -605,10 +606,35 @@ function drawHeatmap(
     const cw = canvas.width || 640;
     const ch = canvas.height || 480;
     ctx.clearRect(0, 0, cw, ch);
-    ctx.globalAlpha = 0.65;
+
     if (roi) {
-      ctx.drawImage(img, roi.x * cw, roi.y * ch, roi.w * cw, roi.h * ch);
+      const rx = roi.x * cw, ry = roi.y * ch, rw = roi.w * cw, rh = roi.h * ch;
+
+      // heatmap inside ROI
+      ctx.globalAlpha = 0.65;
+      ctx.drawImage(img, rx, ry, rw, rh);
+
+      // ROI border (green = matched, yellow = fallback)
+      const matched = (matchConfidence ?? 0) >= 0.35;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = matched ? '#4ADE80' : '#FACC15';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(rx, ry, rw, rh);
+
+      // corner accents
+      const len = Math.min(rw, rh) * 0.12;
+      ctx.lineWidth = 3;
+      [[rx, ry, 1, 1], [rx + rw, ry, -1, 1], [rx, ry + rh, 1, -1], [rx + rw, ry + rh, -1, -1]].forEach(
+        ([x, y, sx, sy]) => {
+          ctx.beginPath();
+          ctx.moveTo(x + sx * len, y);
+          ctx.lineTo(x, y);
+          ctx.lineTo(x, y + sy * len);
+          ctx.stroke();
+        },
+      );
     } else {
+      ctx.globalAlpha = 0.65;
       ctx.drawImage(img, 0, 0, cw, ch);
     }
   };
