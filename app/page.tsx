@@ -158,6 +158,7 @@ export default function Page() {
   useEffect(() => {
     if (mode !== 'inspecting') return;
     inspectingRef.current = true;
+    let emaScore: number | null = null; // スコアの指数移動平均（バッジのチラつき抑制）
 
     // 1件ずつ送信し、応答を待ってから次のフレームを送る（並行送信すると
     // バックエンドにリクエストが滞留し、全部タイムアウトする）
@@ -177,9 +178,14 @@ export default function Page() {
             const r = await fetch(`${BACKEND}/inspect`, { method: 'POST', body: fd, signal: ic.signal });
             const data = await r.json();
             if (r.ok && inspectingRef.current) {
+              const raw = data.normalized_score;
+              const next = emaScore === null ? raw : emaScore * 0.5 + raw * 0.5;
+              emaScore = next;
+              const smoothed = Math.round(next * 1000) / 1000;
               setLatestResult({
                 ...data,
-                judgment: data.normalized_score > sensitivityRef.current ? 'NG' : 'OK',
+                normalized_score: smoothed,
+                judgment: smoothed > sensitivityRef.current ? 'NG' : 'OK',
               });
               drawHeatmap(overlayRef.current, data.heatmap);
             }
@@ -451,7 +457,7 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
 
       <div className="relative rounded-2xl overflow-hidden bg-black aspect-video">
         <video ref={videoRef} playsInline muted className="absolute inset-0 w-full h-full object-cover" />
-        <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
+        <canvas ref={overlayRef} width={1024} height={576} className="absolute inset-0 w-full h-full" />
       </div>
 
       {!result && (

@@ -10,7 +10,9 @@ import cv2
 import pickle
 import pathlib
 
-IMG_SIZE = 224
+IMG_W, IMG_H = 256, 144  # 16:9 を維持して歪みを防ぐ（縦横を32の倍数に）
+BANK_SIZE = 3000         # 特徴量バンク上限（小さいほど検査が速い）
+SMOOTH_SIGMA = 4.0       # 異常マップのガウシアンぼかし
 SAVE_PATH = pathlib.Path("model_state.pkl")
 
 
@@ -23,7 +25,7 @@ class PatchCoreInspector:
         self.reference_image: bytes | None = None
 
         self.transform = T.Compose([
-            T.Resize((IMG_SIZE, IMG_SIZE)),
+            T.Resize((IMG_H, IMG_W)),  # アスペクト比を保って 16:9 にリサイズ
             T.ToTensor(),
             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
@@ -84,8 +86,8 @@ class PatchCoreInspector:
             patches_list.append(self._to_patches(feats))
 
         bank = torch.cat(patches_list, dim=0)
-        if bank.shape[0] > 10_000:
-            idx = torch.randperm(bank.shape[0])[:10_000]
+        if bank.shape[0] > BANK_SIZE:
+            idx = torch.randperm(bank.shape[0])[:BANK_SIZE]
             bank = bank[idx]
 
         self.feature_bank = bank
@@ -98,8 +100,8 @@ class PatchCoreInspector:
         scores = []
         for i, patches in enumerate(patches_list):
             others = torch.cat([p for j, p in enumerate(patches_list) if j != i], dim=0)
-            dist = torch.cdist(patches, others)
-            scores.append(float(dist.min(dim=1).values.max()))
+            amap = self._anomaly_map(patches, others)
+            scores.append(self._map_score(amap))
         self.threshold = max(float(np.percentile(scores, 99)) * 1.25, 1e-6)
         self._save()
 
@@ -109,12 +111,20 @@ class PatchCoreInspector:
             "fit_seconds": round(time.time() - t0, 1),
         }
 
-    def _score(self, img_bytes: bytes) -> float:
-        tensor = self._preprocess(img_bytes)
-        feats = self._extract(tensor)
-        patches = self._to_patches(feats)
-        dist = torch.cdist(patches, self.feature_bank)
-        return float(dist.min(dim=1).values.max())
+    def _patch_grid(self, n_patches: int) -> tuple[int, int]:
+        # layer2 の特徴マップ形状（入力解像度から決まる）
+        return IMG_H // 8, IMG_W // 8
+
+    def _anomaly_map(self, patches: torch.Tensor, bank: torch.Tensor) -> np.ndarray:
+        h, w = self._patch_grid(patches.shape[0])
+        dist = torch.cdist(patches, bank)
+        amap = dist.min(dim=1).values.reshape(h, w).cpu().float().numpy()
+        # ガウシアンぼかしでノイズ除去 → スコア安定＆ヒートマップ平滑化
+        return cv2.GaussianBlur(amap, (0, 0), SMOOTH_SIGMA)
+
+    def _map_score(self, amap: np.ndarray) -> float:
+        # 最大1点ではなく上位パーセンタイルで安定化（外れ値に強い）
+        return float(np.percentile(amap, 99))
 
     def predict(self, img_bytes: bytes, heat_threshold: float = 0.5) -> dict:
         if not self.is_fitted:
@@ -122,13 +132,10 @@ class PatchCoreInspector:
 
         tensor = self._preprocess(img_bytes)
         feats = self._extract(tensor)
-        B, C, h, w = feats.shape
         patches = self._to_patches(feats)
+        anomaly_map = self._anomaly_map(patches, self.feature_bank)
 
-        dist = torch.cdist(patches, self.feature_bank)
-        anomaly_map = dist.min(dim=1).values.reshape(h, w).cpu().float().numpy()
-
-        score = float(anomaly_map.max())
+        score = self._map_score(anomaly_map)
         normalized = score / self.threshold
         judgment = "NG" if normalized > 1.0 else "OK"
 
@@ -156,6 +163,8 @@ class PatchCoreInspector:
         visibility = np.clip((rel - cutoff) / 0.6, 0, 1)
         rgba[:, :, 3] = (visibility * 200).astype(np.uint8)
 
-        rgba = cv2.resize(rgba, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+        # 16:9 のまま高解像度に拡大（映像にそのまま重なる）
+        rgba = cv2.resize(rgba, (IMG_W * 4, IMG_H * 4), interpolation=cv2.INTER_LINEAR)
         _, buf = cv2.imencode(".png", rgba)
         return base64.b64encode(buf.tobytes()).decode()
+
