@@ -441,7 +441,12 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
   onBack: () => void;
 }) {
   const isNG = result?.judgment === 'NG';
-  const score = result?.normalized_score ?? 0;
+  // 100% = NG境界線に固定。感度スライダーを動かしても100%の意味が変わらない。
+  const displayPct = result ? Math.round((result.normalized_score / sensitivity) * 100) : 0;
+  // バーは120%を上限として表示（100%の位置にNGラインマーカーを置く）
+  const BAR_MAX = 120;
+  const barFill = Math.min(displayPct, BAR_MAX) / BAR_MAX * 100;
+  const ngLinePos = (100 / BAR_MAX * 100).toFixed(2); // 83.33%
 
   return (
     <div className="space-y-4">
@@ -467,34 +472,39 @@ function InspectScreen({ videoRef, overlayRef, result, sensitivity, onSensitivit
       {result && (
         <div>
           <div className="flex justify-between text-sm mb-1">
-            <span className="text-slate-400">異常スコア</span>
-            <span className={isNG ? 'text-red-400 font-bold' : 'text-emerald-400'}>
-              {(score * 100).toFixed(0)}% {isNG ? '(NG)' : '(OK)'}
+            <span className="text-slate-400">異常スコア（100%超でNG）</span>
+            <span className={`font-bold ${isNG ? 'text-red-400' : displayPct > 80 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+              {displayPct}%
             </span>
           </div>
-          <div className="w-full bg-slate-700 rounded-full h-3">
-            <div className={`h-3 rounded-full transition-all duration-150 ${isNG ? 'bg-red-500' : score > 0.7 ? 'bg-yellow-500' : 'bg-emerald-500'}`}
-              style={{ width: `${Math.min(score * 100, 100)}%` }} />
-          </div>
-          <div className="flex justify-end mt-0.5">
-            <span className="text-xs text-slate-500">閾値: 100%</span>
+          {/* バー: 120%上限、100%位置にNGラインを白マーカーで表示 */}
+          <div className="relative w-full bg-slate-700 rounded-full h-4">
+            <div
+              className={`h-4 rounded-full transition-all duration-200 ${isNG ? 'bg-red-500' : displayPct > 80 ? 'bg-yellow-500' : 'bg-emerald-500'}`}
+              style={{ width: `${barFill}%` }}
+            />
+            {/* NGライン（100%）マーカー */}
+            <div className="absolute top-0 bottom-0 w-0.5 bg-white rounded-full"
+              style={{ left: `${ngLinePos}%` }} />
+            <span className="absolute -top-5 text-xs text-white/60 -translate-x-1/2"
+              style={{ left: `${ngLinePos}%` }}>NG</span>
           </div>
         </div>
       )}
 
       <div className="bg-slate-800 rounded-2xl px-4 py-3 space-y-2">
         <div className="flex justify-between text-xs text-slate-400">
-          <span>検出感度（OK/NG判定）</span>
+          <span>NG判定ライン</span>
           <span className="font-medium text-white">
-            {sensitivity <= 0.7 ? '高（敏感）' : sensitivity >= 1.5 ? '低（鈍感）' : '標準'}
-            {' '}({sensitivity.toFixed(1)}x)
+            学習閾値の {sensitivity.toFixed(1)} 倍
+            {sensitivity <= 0.7 ? '（厳しい）' : sensitivity >= 1.5 ? '（緩い）' : ''}
           </span>
         </div>
         <input type="range" min={0.5} max={2.0} step={0.1}
           value={sensitivity} onChange={e => onSensitivityChange(Number(e.target.value))}
           className="w-full accent-blue-500" />
         <div className="flex justify-between text-xs text-slate-500">
-          <span>敏感</span><span>鈍感</span>
+          <span>← 厳しく</span><span>緩く →</span>
         </div>
       </div>
 
