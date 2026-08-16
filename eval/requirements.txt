@@ -1,0 +1,8 @@
+# 検証ハーネスの依存関係。
+# GPU を使う場合は PyTorch を CUDA 版に差し替えてください:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+torch>=2.2
+torchvision>=0.17
+opencv-python-headless>=4.9
+numpy>=1.26
+Pillow>=10.2

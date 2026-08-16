@@ -21,3 +21,14 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 検証データ（撮影した製品画像）と結果
+data/
+*.csv
+backend/model_state.pkl
